@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { MasApiConfig, SoraRateRecord } from '../types/sora';
-import { MAS_API_METADATA } from '../data/masSoraRates';
 import {
   X,
   Database,
@@ -10,6 +9,8 @@ import {
   Code2,
   RefreshCw,
   SlidersHorizontal,
+  Key,
+  Activity,
 } from 'lucide-react';
 
 interface MasApiModalProps {
@@ -21,6 +22,9 @@ interface MasApiModalProps {
   latestRecord: SoraRateRecord;
 }
 
+const OFFICIAL_MAS_ENDPOINT =
+  'https://eservices.mas.gov.sg/apimg-gw/server/monthly_statistical_bulletin_non610mssql/domestic_interest_rates_daily/views/domestic_interest_rates_daily';
+
 export const MasApiModal: React.FC<MasApiModalProps> = ({
   isOpen,
   onClose,
@@ -29,9 +33,9 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
   onManualRateOverride,
   latestRecord,
 }) => {
-  const [activeTab, setActiveTab] = useState<'status' | 'backend' | 'override'>('status');
-  const [proxyUrl, setProxyUrl] = useState(config.proxyUrl || 'http://localhost:3000/api/mas/sora');
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'status' | 'serverless' | 'override'>('serverless');
+  const [testKeyId, setTestKeyId] = useState('');
+  const [testResult, setTestResult] = useState<{ status: 'success' | 'error'; message: string; details?: any } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
 
   // Manual override states
@@ -42,15 +46,79 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleTestConnection = async () => {
+  const handleTestHealth = async () => {
     setIsTesting(true);
     setTestResult(null);
 
-    // Simulate connection test
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const data = await res.json();
+        setTestResult({
+          status: 'success',
+          message: `Health check passed (status: ${data.status}). MAS Key Configured: ${data.environment.masKeyConfigured ? 'Yes' : 'No (Pending manual key)'}`,
+          details: data,
+        });
+      } else {
+        setTestResult({
+          status: 'error',
+          message: `Server returned HTTP ${res.status}: ${res.statusText}`,
+        });
+      }
+    } catch (err: any) {
+      setTestResult({
+        status: 'error',
+        message: `Health check request failed: ${err.message}. Ensure your server / serverless function is running.`,
+      });
+    } finally {
       setIsTesting(false);
-      setTestResult('Success: Endpoint validated. Format matches MAS Domestic Interest Rates dataset structure.');
-    }, 600);
+    }
+  };
+
+  const handleTestSoraFetch = async () => {
+    setIsTesting(true);
+    setTestResult(null);
+
+    try {
+      const headers: Record<string, string> = {};
+      if (testKeyId.trim()) {
+        headers['KeyId'] = testKeyId.trim();
+      }
+
+      const res = await fetch('/api/sora?limit=5', { headers });
+      const data = await res.json();
+
+      if (res.ok && data.status === 'success') {
+        setTestResult({
+          status: 'success',
+          message: `Successfully connected to MAS SORA API. Fetched ${data.count} records. Latest date: ${data.latestDate || 'N/A'}.`,
+          details: data,
+        });
+        if (data.data && data.data.length > 0) {
+          const first = data.data[0];
+          onManualRateOverride({
+            rate: first.rate,
+            comp1m: first.comp1m,
+            comp3m: first.comp3m,
+            comp6m: first.comp6m,
+            soraIndex: first.soraIndex,
+          });
+        }
+      } else {
+        setTestResult({
+          status: 'error',
+          message: data.message || `API error (HTTP ${res.status})`,
+          details: data,
+        });
+      }
+    } catch (err: any) {
+      setTestResult({
+        status: 'error',
+        message: `Fetch failed: ${err.message}`,
+      });
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   const handleApplyOverride = () => {
@@ -74,10 +142,10 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold leading-tight">
-                MAS SORA Rate Feed & Backend Bridge
+                MAS SORA Serverless API Gateway
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Monetary Authority of Singapore (MAS) Data Integration Connector
+                Monetary Authority of Singapore (MAS) Gateway Integration
               </p>
             </div>
           </div>
@@ -92,6 +160,16 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
         {/* Modal Nav Tabs */}
         <div className="flex border-b border-slate-200 bg-slate-50 text-xs px-5 pt-2">
           <button
+            onClick={() => setActiveTab('serverless')}
+            className={`pb-2 px-3 font-semibold border-b-2 transition-colors ${
+              activeTab === 'serverless'
+                ? 'border-emerald-600 text-slate-900'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            Serverless Endpoints (/api)
+          </button>
+          <button
             onClick={() => setActiveTab('status')}
             className={`pb-2 px-3 font-semibold border-b-2 transition-colors ${
               activeTab === 'status'
@@ -99,17 +177,7 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            Connection & Specs
-          </button>
-          <button
-            onClick={() => setActiveTab('backend')}
-            className={`pb-2 px-3 font-semibold border-b-2 transition-colors ${
-              activeTab === 'backend'
-                ? 'border-emerald-600 text-slate-900'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            Backend Hook Setup
+            Endpoint Specifications
           </button>
           <button
             onClick={() => setActiveTab('override')}
@@ -119,105 +187,138 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            Manual Rate Fixing
+            Manual Rate Override
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 text-xs text-slate-700 space-y-4">
-          {activeTab === 'status' && (
+        <div className="p-5 text-xs text-slate-700 space-y-4 max-h-[75vh] overflow-y-auto">
+          {activeTab === 'serverless' && (
             <div className="space-y-4">
-              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3.5 flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="font-semibold text-emerald-950 text-xs">
-                    MAS Benchmark Dataset Active
-                  </h4>
-                  <p className="text-[11px] text-emerald-800 mt-0.5">
-                    Preloaded with authentic Monetary Authority of Singapore historical rate series, updated daily at 9:00am SGT.
-                  </p>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-2">
+                <div className="flex items-center gap-2 text-slate-900 font-semibold">
+                  <Code2 className="w-4 h-4 text-emerald-600" />
+                  <span>Configured Serverless Routes in Project Root:</span>
+                </div>
+                <div className="font-mono text-[11px] space-y-1 text-slate-700">
+                  <div className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded border border-slate-200">
+                    <span>GET /api/health.ts</span>
+                    <span className="text-emerald-700 font-medium">Service Health & Environment Check</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded border border-slate-200">
+                    <span>GET /api/sora.ts</span>
+                    <span className="text-emerald-700 font-medium">Pulls Daily SORA + 1M/3M/6M MAS Data</span>
+                  </div>
                 </div>
               </div>
 
-              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
-                <div className="p-3 flex justify-between">
-                  <span className="text-slate-500">Official Source</span>
-                  <span className="font-semibold text-slate-900">{MAS_API_METADATA.authority}</span>
+              <div className="space-y-2 border border-slate-200 rounded-lg p-3.5">
+                <div className="flex items-center gap-1.5 font-semibold text-slate-900">
+                  <Key className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Authentication Header: KeyId</span>
                 </div>
-                <div className="p-3 flex justify-between">
-                  <span className="text-slate-500">MAS Datastore Resource ID</span>
-                  <span className="font-mono text-slate-800">{MAS_API_METADATA.masResourceId}</span>
-                </div>
-                <div className="p-3 flex justify-between">
-                  <span className="text-slate-500">Publication Schedule</span>
-                  <span className="text-slate-800">{MAS_API_METADATA.publicationSchedule}</span>
-                </div>
-                <div className="p-3 flex justify-between">
-                  <span className="text-slate-500">Day Count Basis</span>
-                  <span className="font-semibold text-slate-800">{MAS_API_METADATA.dayCountBasis}</span>
-                </div>
-                <div className="p-3 flex justify-between">
-                  <span className="text-slate-500">Latest Loaded Date</span>
-                  <span className="font-mono font-semibold text-slate-900">{latestRecord.date}</span>
-                </div>
-              </div>
-            </div>
-          )}
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  No API keys are hardcoded. Set your key in <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">MAS_KEY_ID</code> inside <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">.env</code> or supply it dynamically via the <code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-slate-800">KeyId</code> request header.
+                </p>
 
-          {activeTab === 'backend' && (
-            <div className="space-y-4">
-              <div>
-                <label className="font-semibold text-slate-900 block mb-1">
-                  Custom Backend Proxy URL
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={proxyUrl}
-                    onChange={(e) => setProxyUrl(e.target.value)}
-                    placeholder="https://your-api.domain.com/api/sora"
-                    className="flex-1 py-1.5 px-3 border border-slate-300 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-500"
-                  />
-                  <button
-                    onClick={handleTestConnection}
-                    disabled={isTesting}
-                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded font-medium flex items-center gap-1.5"
-                  >
-                    {isTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
-                    <span>Test Ping</span>
-                  </button>
+                <div className="pt-1">
+                  <label className="text-[11px] text-slate-600 block mb-1">
+                    Optional: Enter KeyId to test connection now
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      placeholder="Enter your MAS KeyId to test..."
+                      value={testKeyId}
+                      onChange={(e) => setTestKeyId(e.target.value)}
+                      className="flex-1 py-1.5 px-3 border border-slate-300 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-500"
+                    />
+                    <button
+                      onClick={handleTestSoraFetch}
+                      disabled={isTesting}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium flex items-center gap-1.5"
+                    >
+                      {isTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
+                      <span>Test /api/sora</span>
+                    </button>
+                    <button
+                      onClick={handleTestHealth}
+                      disabled={isTesting}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium flex items-center gap-1.5"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      <span>Check /api/health</span>
+                    </button>
+                  </div>
                 </div>
-                <span className="text-[11px] text-slate-500 mt-1 block">
-                  When you are ready to integrate your backend, point this to your Express/FastAPI/Spring endpoint.
-                </span>
               </div>
 
               {testResult && (
-                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded text-slate-800 text-[11px] font-mono">
-                  {testResult}
+                <div
+                  className={`p-3 rounded-lg border text-[11px] font-mono leading-relaxed ${
+                    testResult.status === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : 'bg-amber-50 border-amber-200 text-amber-950'
+                  }`}
+                >
+                  <div className="font-semibold mb-1 flex items-center gap-1.5">
+                    {testResult.status === 'success' ? (
+                      <CheckCircle className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-amber-600" />
+                    )}
+                    <span>{testResult.status === 'success' ? 'Connection Successful' : 'Notice / Error'}</span>
+                  </div>
+                  <div>{testResult.message}</div>
+                  {testResult.details && (
+                    <pre className="mt-2 p-2 bg-white/70 rounded text-[10px] overflow-x-auto max-h-40">
+                      {JSON.stringify(testResult.details, null, 2)}
+                    </pre>
+                  )}
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'status' && (
+            <div className="space-y-4">
+              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
+                <div className="p-3">
+                  <span className="text-slate-500 block text-[11px] mb-0.5">Target MAS API Endpoint</span>
+                  <a
+                    href={OFFICIAL_MAS_ENDPOINT}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-emerald-700 hover:underline break-all text-[11px]"
+                  >
+                    {OFFICIAL_MAS_ENDPOINT}
+                  </a>
+                </div>
+                <div className="p-3 flex justify-between">
+                  <span className="text-slate-500">Required Header</span>
+                  <span className="font-mono font-semibold text-slate-800">KeyId: &lt;MAS_KEY_ID&gt;</span>
+                </div>
+                <div className="p-3 flex justify-between">
+                  <span className="text-slate-500">Benchmark Data</span>
+                  <span className="font-semibold text-slate-800">Daily SORA, 1M, 3M, 6M Compounded Averages, SORA Index</span>
+                </div>
+                <div className="p-3 flex justify-between">
+                  <span className="text-slate-500">Day Count Basis</span>
+                  <span className="font-semibold text-slate-800">Actual / 365 (Fixed)</span>
+                </div>
+                <div className="p-3 flex justify-between">
+                  <span className="text-slate-500">Publication Schedule</span>
+                  <span className="text-slate-800">Singapore Business Days at 09:00 SGT</span>
+                </div>
+              </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-semibold text-slate-900 flex items-center gap-1">
-                    <Code2 className="w-3.5 h-3.5 text-slate-600" />
-                    Expected Backend JSON Schema
-                  </span>
-                </div>
+                <span className="font-semibold text-slate-900 block mb-1">
+                  Node / Curl Invocation Sample
+                </span>
                 <pre className="p-3 bg-slate-900 text-emerald-400 rounded-lg text-[10px] font-mono overflow-x-auto leading-relaxed">
-{`{
-  "status": "success",
-  "data": {
-    "date": "2026-10-02",
-    "rate": 3.0825,
-    "comp1m": 3.0910,
-    "comp3m": 3.1420,
-    "comp6m": 3.1850,
-    "soraIndex": 1.21845120,
-    "volumeSgdM": 4890
-  }
-}`}
+{`curl -X GET "https://eservices.mas.gov.sg/apimg-gw/server/monthly_statistical_bulletin_non610mssql/domestic_interest_rates_daily/views/domestic_interest_rates_daily?limit=5" \\
+  -H "KeyId: YOUR_MAS_KEY_ID"`}
                 </pre>
               </div>
             </div>
@@ -308,3 +409,4 @@ export const MasApiModal: React.FC<MasApiModalProps> = ({
     </div>
   );
 };
+
